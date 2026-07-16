@@ -1,0 +1,14 @@
+[package]
+name = "coli-engine"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "colibrì Rust engine binary: stdio serve protocol (drop-in for c/glm) + demo mode"
+
+[[bin]]
+name = "coli-engine"
+path = "src/main.rs"
+
+[dependencies]
+coli-model = { path = "../coli-model" }

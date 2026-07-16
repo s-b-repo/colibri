@@ -1,0 +1,195 @@
+//! The I/O lane: batched positioned reads. On Linux the [`Reactor`] uses
+//! io_uring — one `submit_and_wait` drives up to a full ring of reads through
+//! io-wq (forced `IOSQE_ASYNC`, matching `c/uring.h`), so N expert-slab reads
+//! cost one enter syscall instead of N `pread`s. [`pread_many`] is the portable
+//! fallback (and the correctness oracle for the ring).
+
+use std::os::unix::io::RawFd;
+
+/// One positioned read into a caller-owned buffer.
+pub struct ReadReq<'a> {
+    pub fd: RawFd,
+    pub offset: u64,
+    pub buf: &'a mut [u8],
+    /// caller tag echoed back (e.g. an expert id); not used by the reader
+    pub tag: u64,
+}
+
+/// Portable fallback: one `pread` per request. Returns per-request byte counts
+/// (or a negative errno). Always available; used to validate the io_uring path.
+pub fn pread_many(reqs: &mut [ReadReq]) -> Vec<i64> {
+    use std::os::unix::fs::FileExt;
+    reqs.iter_mut()
+        .map(|r| {
+            // SAFETY: we only read via the fd; the File is not owned so we must
+            // not close it — use a borrowed File that we `forget`.
+            let file = unsafe { borrow_fd(r.fd) };
+            let res = match file.read_at(r.buf, r.offset) {
+                Ok(n) => n as i64,
+                Err(e) => -(e.raw_os_error().unwrap_or(5) as i64),
+            };
+            std::mem::forget(file);
+            res
+        })
+        .collect()
+}
+
+// Reconstruct a File from a raw fd for a borrowed read, without taking ownership
+// (caller must `forget` it so Drop doesn't close the fd).
+unsafe fn borrow_fd(fd: RawFd) -> std::fs::File {
+    use std::os::unix::io::FromRawFd;
+    std::fs::File::from_raw_fd(fd)
+}
+
+#[cfg(target_os = "linux")]
+mod uring {
+    use super::ReadReq;
+    use io_uring::{opcode, squeue, types, IoUring};
+    use std::io;
+
+    /// io_uring-backed batched reader (the I/O lane owner thread holds one).
+    pub struct Reactor {
+        ring: IoUring,
+        cap: usize,
+        force_async: bool,
+    }
+
+    impl Reactor {
+        /// `entries` = submission-queue depth (rounded up to a power of two by the
+        /// kernel). Cold NVMe streaming wants this ≥ the per-layer expert count.
+        pub fn new(entries: u32) -> io::Result<Reactor> {
+            let ring = IoUring::new(entries)?;
+            Ok(Reactor { ring, cap: entries as usize, force_async: true })
+        }
+
+        /// Bound the io-wq worker pool (like `IORING_REGISTER_IOWQ_MAX_WORKERS`).
+        /// `[bounded, unbounded]`.
+        pub fn set_iowq_max_workers(&mut self, bounded: u32, unbounded: u32) -> io::Result<()> {
+            let mut vals = [bounded, unbounded];
+            self.ring.submitter().register_iowq_max_workers(&mut vals)
+        }
+
+        /// Toggle forced `IOSQE_ASYNC` (default on: cold buffered reads run on
+        /// io-wq instead of inline, so the submitter never serializes).
+        pub fn set_force_async(&mut self, on: bool) {
+            self.force_async = on;
+        }
+
+        /// Submit all `reqs` (chunked to the ring depth) and wait for every
+        /// completion. Returns per-request result codes in `reqs` order. The
+        /// buffers are filled directly by the kernel.
+        pub fn read_many(&mut self, reqs: &mut [ReadReq]) -> io::Result<Vec<i64>> {
+            let mut results = vec![i64::MIN; reqs.len()];
+            let mut i = 0;
+            while i < reqs.len() {
+                let end = (i + self.cap).min(reqs.len());
+                for j in i..end {
+                    let (ptr, len) = (reqs[j].buf.as_mut_ptr(), reqs[j].buf.len() as u32);
+                    let mut e = opcode::Read::new(types::Fd(reqs[j].fd), ptr, len)
+                        .offset(reqs[j].offset)
+                        .build()
+                        .user_data(j as u64);
+                    if self.force_async {
+                        e = e.flags(squeue::Flags::ASYNC);
+                    }
+                    // SAFETY: buf outlives the op — read_many blocks until every
+                    // completion for this chunk is reaped below.
+                    unsafe {
+                        self.ring
+                            .submission()
+                            .push(&e)
+                            .map_err(|_| io::Error::new(io::ErrorKind::Other, "submission queue full"))?;
+                    }
+                }
+                self.ring.submit_and_wait(end - i)?;
+                let mut got = 0;
+                for cqe in self.ring.completion() {
+                    results[cqe.user_data() as usize] = cqe.result() as i64;
+                    got += 1;
+                }
+                debug_assert_eq!(got, end - i);
+                i = end;
+            }
+            Ok(results)
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+pub use uring::Reactor;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+
+    fn temp_file_with(pattern: &[u8], n: usize) -> (std::fs::File, std::path::PathBuf, Vec<u8>) {
+        let path = std::env::temp_dir().join(format!("coli_io_{}_{}", std::process::id(), n));
+        let mut data = Vec::new();
+        while data.len() < n {
+            data.extend_from_slice(pattern);
+        }
+        data.truncate(n);
+        let mut f = std::fs::File::create(&path).unwrap();
+        f.write_all(&data).unwrap();
+        f.sync_all().unwrap();
+        let rf = std::fs::File::open(&path).unwrap();
+        (rf, path, data)
+    }
+
+    #[test]
+    fn pread_many_reads_offsets() {
+        use std::os::unix::io::AsRawFd;
+        let (f, path, data) = temp_file_with(b"0123456789", 1000);
+        let fd = f.as_raw_fd();
+        let mut b0 = [0u8; 10];
+        let mut b1 = [0u8; 16];
+        let mut b2 = [0u8; 8];
+        let mut reqs = vec![
+            ReadReq { fd, offset: 0, buf: &mut b0, tag: 0 },
+            ReadReq { fd, offset: 100, buf: &mut b1, tag: 1 },
+            ReadReq { fd, offset: 500, buf: &mut b2, tag: 2 },
+        ];
+        let res = pread_many(&mut reqs);
+        assert_eq!(res, vec![10, 16, 8]);
+        assert_eq!(&b0, &data[0..10]);
+        assert_eq!(&b1, &data[100..116]);
+        assert_eq!(&b2, &data[500..508]);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn uring_matches_pread() {
+        use std::os::unix::io::AsRawFd;
+        let (f, path, data) = temp_file_with(b"abcdefghijklmnop", 8192);
+        let fd = f.as_raw_fd();
+        // 20 reads > ring depth 8 → exercises chunking
+        let mut bufs: Vec<Vec<u8>> = (0..20).map(|k| vec![0u8; 64 + k]).collect();
+        let offs: Vec<u64> = (0..20).map(|k| (k as u64 * 97) % 4000).collect();
+
+        let mut reactor = match Reactor::new(8) {
+            Ok(r) => r,
+            Err(e) => {
+                eprintln!("io_uring unavailable ({e}); skipping");
+                let _ = std::fs::remove_file(&path);
+                return;
+            }
+        };
+        let _ = reactor.set_iowq_max_workers(4, 4);
+        let mut reqs: Vec<ReadReq> = bufs
+            .iter_mut()
+            .enumerate()
+            .map(|(k, b)| ReadReq { fd, offset: offs[k], buf: b.as_mut_slice(), tag: k as u64 })
+            .collect();
+        let res = reactor.read_many(&mut reqs).unwrap();
+
+        for k in 0..20 {
+            let len = 64 + k;
+            assert_eq!(res[k], len as i64, "read {k} short");
+            let off = offs[k] as usize;
+            assert_eq!(&bufs[k][..], &data[off..off + len], "read {k} data mismatch");
+        }
+        let _ = std::fs::remove_file(&path);
+    }
+}
