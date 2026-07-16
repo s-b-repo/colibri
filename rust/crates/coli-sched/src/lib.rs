@@ -39,6 +39,10 @@ pub struct DiskExpert {
 pub struct Streamer {
     #[cfg(target_os = "linux")]
     reactor: Option<coli_io::Reactor>,
+    /// distinct shard fds currently registered as fixed files (stable for a
+    /// loaded model, so registration happens once and reads reuse it).
+    #[cfg(target_os = "linux")]
+    registered: Vec<RawFd>,
 }
 
 impl Streamer {
@@ -47,7 +51,7 @@ impl Streamer {
     pub fn new(depth: u32) -> Streamer {
         #[cfg(target_os = "linux")]
         {
-            Streamer { reactor: coli_io::Reactor::new(depth.max(1)).ok() }
+            Streamer { reactor: coli_io::Reactor::new(depth.max(1)).ok(), registered: Vec::new() }
         }
         #[cfg(not(target_os = "linux"))]
         {
@@ -58,6 +62,22 @@ impl Streamer {
     /// Read every disk expert's blob (io_uring batch on Linux, else `pread`).
     fn read_experts(&mut self, specs: &[(usize, RawFd, u64, usize, MlpDims)]) -> Vec<(usize, Vec<u8>, MlpDims)> {
         use coli_io::{pread_many, ReadReq};
+
+        // Register this batch's distinct shard fds as fixed files when the set
+        // changes (once, for a stable model) so reads skip per-op fd lookup.
+        #[cfg(target_os = "linux")]
+        if let Some(r) = self.reactor.as_mut() {
+            let mut fds: Vec<RawFd> = specs.iter().map(|s| s.1).collect();
+            fds.sort_unstable();
+            fds.dedup();
+            if !fds.is_empty() && fds != self.registered {
+                match r.register_files(&fds) {
+                    Ok(()) => self.registered = fds,
+                    Err(_) => self.registered.clear(),
+                }
+            }
+        }
+
         let mut bufs: Vec<Vec<u8>> = specs.iter().map(|&(_, _, _, len, _)| vec![0u8; len]).collect();
         {
             let mut reqs: Vec<ReadReq> = bufs

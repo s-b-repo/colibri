@@ -43,12 +43,16 @@ mod uring {
     use super::ReadReq;
     use io_uring::{opcode, squeue, types, IoUring};
     use std::io;
+    use std::os::unix::io::RawFd;
 
     /// io_uring-backed batched reader (the I/O lane owner thread holds one).
     pub struct Reactor {
         ring: IoUring,
         cap: usize,
         force_async: bool,
+        /// fds registered with the kernel (index = fixed-file slot). A read whose
+        /// fd is here uses `IOSQE_FIXED_FILE`, skipping per-op fd lookup/refcount.
+        registered: Vec<RawFd>,
     }
 
     impl Reactor {
@@ -69,7 +73,27 @@ mod uring {
                 .setup_coop_taskrun()
                 .build(entries)
                 .or_else(|_| IoUring::new(entries))?;
-            Ok(Reactor { ring, cap: entries as usize, force_async: true })
+            Ok(Reactor { ring, cap: entries as usize, force_async: true, registered: Vec::new() })
+        }
+
+        /// Register `fds` as fixed files. Subsequent reads whose fd is in this set
+        /// use `IOSQE_FIXED_FILE`, so the kernel skips the per-op fd table lookup
+        /// and refcount — worthwhile when the same shard fds are read every token.
+        /// Replaces any previous registration. Errors are non-fatal to the caller:
+        /// on failure, reads simply fall back to the plain-fd path.
+        pub fn register_files(&mut self, fds: &[RawFd]) -> io::Result<()> {
+            if !self.registered.is_empty() {
+                let _ = self.ring.submitter().unregister_files();
+                self.registered.clear();
+            }
+            self.ring.submitter().register_files(fds)?;
+            self.registered = fds.to_vec();
+            Ok(())
+        }
+
+        /// The fixed-file slot for `fd`, if it was registered.
+        pub fn is_registered(&self, fd: RawFd) -> bool {
+            self.registered.contains(&fd)
         }
 
         /// Bound the io-wq worker pool (like `IORING_REGISTER_IOWQ_MAX_WORKERS`).
@@ -95,10 +119,14 @@ mod uring {
                 let end = (i + self.cap).min(reqs.len());
                 for j in i..end {
                     let (ptr, len) = (reqs[j].buf.as_mut_ptr(), reqs[j].buf.len() as u32);
-                    let mut e = opcode::Read::new(types::Fd(reqs[j].fd), ptr, len)
-                        .offset(reqs[j].offset)
-                        .build()
-                        .user_data(j as u64);
+                    let off = reqs[j].offset;
+                    // registered fd → fixed-file read (skips per-op fd lookup)
+                    let fixed = self.registered.iter().position(|&f| f == reqs[j].fd);
+                    let mut e = match fixed {
+                        Some(idx) => opcode::Read::new(types::Fixed(idx as u32), ptr, len).offset(off).build(),
+                        None => opcode::Read::new(types::Fd(reqs[j].fd), ptr, len).offset(off).build(),
+                    }
+                    .user_data(j as u64);
                     if self.force_async {
                         e = e.flags(squeue::Flags::ASYNC);
                     }
@@ -200,6 +228,39 @@ mod tests {
             let off = offs[k] as usize;
             assert_eq!(&bufs[k][..], &data[off..off + len], "read {k} data mismatch");
         }
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn uring_registered_files_read() {
+        // reads through IOSQE_FIXED_FILE (registered fd) must return the same
+        // bytes as a plain read.
+        use std::os::unix::io::AsRawFd;
+        let (f, path, data) = temp_file_with(b"registered-file-payload", 4096);
+        let fd = f.as_raw_fd();
+        let mut reactor = match Reactor::new(8) {
+            Ok(r) => r,
+            Err(_) => {
+                let _ = std::fs::remove_file(&path);
+                return;
+            }
+        };
+        if reactor.register_files(&[fd]).is_err() {
+            let _ = std::fs::remove_file(&path); // kernel without fixed-files → skip
+            return;
+        }
+        assert!(reactor.is_registered(fd));
+        let mut b0 = vec![0u8; 32];
+        let mut b1 = vec![0u8; 40];
+        let mut reqs = vec![
+            ReadReq { fd, offset: 10, buf: &mut b0, tag: 0 },
+            ReadReq { fd, offset: 100, buf: &mut b1, tag: 1 },
+        ];
+        let res = reactor.read_many(&mut reqs).unwrap();
+        assert_eq!(res, vec![32, 40]);
+        assert_eq!(&b0[..], &data[10..42]);
+        assert_eq!(&b1[..], &data[100..140]);
         let _ = std::fs::remove_file(&path);
     }
 }
