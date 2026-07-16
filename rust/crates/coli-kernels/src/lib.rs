@@ -3,6 +3,11 @@
 //! AVX-VNNI variants are validated bit-identical to them. Ported from the IDOT
 //! kernels in `c/glm.c` (`qrow_i8`, `dot_i8i8`, `dot_i4i8`, `matmul_*_idot`).
 
+// Explicit index loops are the deliberate house style in these numeric kernels:
+// they mirror the C ports (for line-by-line verification) and most index several
+// slices at once, so `needless_range_loop` is noise here.
+#![allow(clippy::needless_range_loop)]
+
 pub mod idot;
 pub mod matmul;
 pub mod quant;

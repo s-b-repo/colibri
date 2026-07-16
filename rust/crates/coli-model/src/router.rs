@@ -24,6 +24,7 @@ pub struct Routed {
 /// Route `x[S,D]` through `router_w[E,D]` (+ `router_bias[E]`), selecting top-`k`
 /// experts per position. `norm_topk` renormalizes the kept gate weights;
 /// `routed_scale` multiplies them (DeepSeek `routed_scaling_factor`).
+#[allow(clippy::too_many_arguments)] // router config is inherently wide
 pub fn route(
     x: &[f32],
     router_w: &[f32],
@@ -56,7 +57,7 @@ pub fn route(
             let mut best = -1i32;
             let mut bv = -1e30f32;
             for e in 0..e_n {
-                if ib[..kk].iter().any(|&c| c == e as i32) {
+                if ib[..kk].contains(&(e as i32)) {
                     continue;
                 }
                 if choice[e] > bv {

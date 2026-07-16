@@ -6,6 +6,10 @@
 //! on [`coli_kernels`], the full layer/forward loop, and — on a machine with
 //! `transformers` — the token-exact gate against `c/ref_glm.json`.
 
+// Explicit index loops mirror the C forward pass (for verification) and mostly
+// index several tensors at once — `needless_range_loop` is noise in this crate.
+#![allow(clippy::needless_range_loop)]
+
 pub mod attention;
 pub mod math;
 pub mod mlp;

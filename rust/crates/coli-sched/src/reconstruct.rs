@@ -14,7 +14,7 @@ pub struct MlpDims {
 }
 
 fn i4_qlen(o: usize, i: usize) -> usize {
-    o * ((i + 1) / 2)
+    o * (i.div_ceil(2))
 }
 
 /// Serialize an int4 expert (gate/up/down) into one contiguous blob.

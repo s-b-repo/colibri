@@ -40,7 +40,7 @@ impl QtWeight {
         let info = QtInfo::detect(st, name, o as i64, i as i64);
         let nb = match info.fmt {
             QtFmt::Int8 => o * i,
-            QtFmt::Int4 => o * ((i + 1) / 2),
+            QtFmt::Int4 => o * (i.div_ceil(2)),
             other => {
                 return Err(Error::Format(format!(
                     "weight '{name}': fmt {other:?} not yet supported in the Rust engine"
@@ -100,7 +100,7 @@ impl QtWeight {
                 }
             }
             QtFmt::Int4 => {
-                let rb = (self.i + 1) / 2;
+                let rb = self.i.div_ceil(2);
                 for i in 0..self.i {
                     let byte = self.q[o * rb + (i >> 1)];
                     let nib = if i & 1 == 0 { (byte & 0x0F) as i32 } else { (byte >> 4) as i32 };
@@ -126,7 +126,7 @@ impl QtWeight {
                 }
             }
             QtFmt::Int4 => {
-                let rb = (self.i + 1) / 2;
+                let rb = self.i.div_ceil(2);
                 for o in 0..self.o {
                     let s = self.scale[o];
                     for i in 0..self.i {
@@ -164,7 +164,7 @@ pub(crate) mod test_support {
     }
 
     pub fn quant_i4(w: &[f32], o: usize, i: usize) -> QtWeight {
-        let rb = (i + 1) / 2;
+        let rb = i.div_ceil(2);
         let mut q = vec![0u8; o * rb];
         let mut sc = vec![0f32; o];
         for oo in 0..o {

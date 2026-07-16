@@ -30,6 +30,7 @@ pub fn matmul_f32(y: &mut [f32], x: &[f32], w: &[f32], s_n: usize, d_n: usize, o
 }
 
 /// int8 weights `q[O*I]`, int8 activations `xq[S*I]` → `y[S*O]`.
+#[allow(clippy::too_many_arguments)] // matmul shapes are inherently wide
 pub fn matmul_q_idot(y: &mut [f32], xq: &[i8], sx: &[f32], q: &[i8], scale: &[f32], s_n: usize, i_n: usize, o_n: usize) {
     for o in 0..o_n {
         let w = &q[o * i_n..o * i_n + i_n];
@@ -43,8 +44,9 @@ pub fn matmul_q_idot(y: &mut [f32], xq: &[i8], sx: &[f32], q: &[i8], scale: &[f3
 }
 
 /// packed-int4 weights `q4[O*ceil(I/2)]`, int8 activations `xq[S*I]` → `y[S*O]`.
+#[allow(clippy::too_many_arguments)]
 pub fn matmul_i4_idot(y: &mut [f32], xq: &[i8], sx: &[f32], q4: &[u8], scale: &[f32], s_n: usize, i_n: usize, o_n: usize) {
-    let rb = (i_n + 1) / 2;
+    let rb = i_n.div_ceil(2);
     for o in 0..o_n {
         let w = &q4[o * rb..o * rb + rb];
         let sc = scale[o];
@@ -58,6 +60,7 @@ pub fn matmul_i4_idot(y: &mut [f32], xq: &[i8], sx: &[f32], q4: &[u8], scale: &[
 
 /// Convenience: quantize f32 activations row-wise (`qrow_i8`) into `xq`/`sx`
 /// scratch, then run [`matmul_q_idot`]. `xq` is `S*I`, `sx` is `S`.
+#[allow(clippy::too_many_arguments)] // matmul shape (dims + scratch) is inherently wide
 pub fn matmul_i8_from_f32(
     y: &mut [f32],
     x: &[f32],
@@ -76,6 +79,7 @@ pub fn matmul_i8_from_f32(
 }
 
 /// Convenience: same as [`matmul_i8_from_f32`] for packed-int4 weights.
+#[allow(clippy::too_many_arguments)]
 pub fn matmul_i4_from_f32(
     y: &mut [f32],
     x: &[f32],
@@ -127,7 +131,7 @@ mod tests {
 
     /// Per-row int4 weight quantizer (test helper): scale = amax/7, nibbles [-8,7].
     fn quant_i4_rows(w: &[f32], o_n: usize, i_n: usize) -> (Vec<u8>, Vec<f32>) {
-        let rb = (i_n + 1) / 2;
+        let rb = i_n.div_ceil(2);
         let mut q = vec![0u8; o_n * rb];
         let mut sc = vec![0f32; o_n];
         for o in 0..o_n {
@@ -178,7 +182,7 @@ mod tests {
         let xf: Vec<f32> = (0..s_n * i_n).map(|_| rng.f()).collect();
         let wf: Vec<f32> = (0..o_n * i_n).map(|_| rng.f()).collect();
         let (q4, sc4) = quant_i4_rows(&wf, o_n, i_n);
-        let rb = (i_n + 1) / 2;
+        let rb = i_n.div_ceil(2);
 
         let mut xq = vec![0i8; s_n * i_n];
         let mut sx = vec![0f32; s_n];

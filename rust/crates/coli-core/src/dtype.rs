@@ -23,7 +23,9 @@ pub enum Dtype {
 
 impl Dtype {
     /// Parse a safetensors `dtype` string. `I8` maps to `U8` (both are raw
-    /// quantized bytes here), matching `st_dtype_code`.
+    /// quantized bytes here), matching `st_dtype_code`. Returns `Option` (not
+    /// `Result`), so this is deliberately not the `FromStr` trait method.
+    #[allow(clippy::should_implement_trait)]
     pub fn from_str(s: &str) -> Option<Dtype> {
         match s {
             "BF16" => Some(Dtype::Bf16),

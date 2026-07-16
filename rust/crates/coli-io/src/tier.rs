@@ -18,7 +18,7 @@ pub struct Swap {
 /// Combined score: `heat << 8 | recent`. Port of `tier_lfru_score`.
 pub fn lfru_score(heat: u32, last: u32, clock: u32) -> u64 {
     let age = clock.wrapping_sub(last);
-    let recent = if age < 255 { 255 - age } else { 0 };
+    let recent = 255u32.saturating_sub(age); // 255-age, floored at 0
     ((heat as u64) << 8) | recent as u64
 }
 

@@ -98,8 +98,8 @@ impl Cfg {
                 .get("index_skip_topk_offset")
                 .and_then(|v| v.as_i64())
                 .unwrap_or(2);
-            for i in 0..idx_type.len() {
-                idx_type[i] = match types.and_then(|t| t.get(i)).and_then(|v| v.as_str()) {
+            for (i, slot) in idx_type.iter_mut().enumerate() {
+                *slot = match types.and_then(|t| t.get(i)).and_then(|v| v.as_str()) {
                     Some(s) => s == "full",
                     None => {
                         let v = (i as i64) - off + 1;

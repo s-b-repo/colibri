@@ -77,7 +77,7 @@ pub fn quant_i8(w: &[f32], o: usize, i: usize) -> (Vec<u8>, Vec<f32>) {
 /// Quantize a weight `[O, I]` to per-row packed int4: returns
 /// `(bytes[O*ceil(I/2)], scale[O])`. Nibbles are biased by +8 into `[0,15]`.
 pub fn quant_i4(w: &[f32], o: usize, i: usize) -> (Vec<u8>, Vec<f32>) {
-    let rb = (i + 1) / 2;
+    let rb = i.div_ceil(2);
     let mut q = vec![0u8; o * rb];
     let mut sc = vec![0f32; o];
     for oo in 0..o {

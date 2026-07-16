@@ -87,6 +87,10 @@ pub mod x86 {
     /// int8·int8 via AVX2 `maddubs`: |w| (unsigned) × x·sign(w). Adjacent-pair
     /// products stay < 32767 (bound 2·128·127) so the 16-bit intermediate never
     /// saturates — the sum is exact.
+    ///
+    /// # Safety
+    /// The CPU must support AVX2. The [`super::dot_i8i8`] dispatcher verifies this
+    /// with `is_x86_feature_detected!` before calling.
     #[target_feature(enable = "avx2")]
     pub unsafe fn dot_i8i8_avx2(w: &[i8], x: &[i8], n: usize) -> i32 {
         let ones = _mm256_set1_epi16(1);
@@ -107,6 +111,10 @@ pub mod x86 {
     }
 
     /// int8·int8 via AVX-VNNI `vpdpbusd` (256-bit): u8·s8 → s32 directly.
+    ///
+    /// # Safety
+    /// The CPU must support AVX2 and AVX-VNNI. [`super::dot_i8i8`] checks both
+    /// with `is_x86_feature_detected!` before calling.
     #[target_feature(enable = "avx2,avxvnni")]
     pub unsafe fn dot_i8i8_vnni(w: &[i8], x: &[i8], n: usize) -> i32 {
         let mut acc = _mm256_setzero_si256();
@@ -127,6 +135,9 @@ pub mod x86 {
 
     /// packed-int4·int8 via AVX2. Unpacks 16 bytes → 32 nibbles in order,
     /// biases by −8, then the same maddubs sign-trick as int8.
+    ///
+    /// # Safety
+    /// The CPU must support AVX2. [`super::dot_i4i8`] verifies this before calling.
     #[target_feature(enable = "avx2")]
     pub unsafe fn dot_i4i8_avx2(w4: &[u8], x: &[i8], n: usize) -> i32 {
         let m4 = _mm_set1_epi8(0x0F);
@@ -179,7 +190,7 @@ mod tests {
     }
 
     fn pack_i4(vals: &[i32]) -> Vec<u8> {
-        let rb = (vals.len() + 1) / 2;
+        let rb = vals.len().div_ceil(2);
         let mut out = vec![0u8; rb];
         for (i, &v) in vals.iter().enumerate() {
             let bias = (v + 8) as u8 & 0x0F;

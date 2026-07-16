@@ -42,7 +42,7 @@ pub fn build_tiny_model_seeded(dir: &Path, seed: u64) {
     let w4 = |blobs: &mut Vec<Blob>, name: &str, o: usize, i: usize, r: &mut Lcg| {
         let w = rnd(o * i, r);
         let (q, s) = quant_i4(&w, o, i);
-        blobs.push(Blob::new(name.to_string(), "U8", vec![o as i64, ((i + 1) / 2) as i64], q));
+        blobs.push(Blob::new(name.to_string(), "U8", vec![o as i64, (i.div_ceil(2)) as i64], q));
         blobs.push(Blob::new(format!("{name}.qs"), "F32", vec![o as i64], f32_bytes(&s)));
     };
     let wf = |blobs: &mut Vec<Blob>, name: &str, n: usize, r: &mut Lcg| {

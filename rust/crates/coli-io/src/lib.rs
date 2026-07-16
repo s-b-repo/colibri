@@ -9,6 +9,9 @@
 //! The concurrent hand-off between this lane and the CPU/GPU compute lanes is
 //! the M4 scheduler.
 
+// tier.h is ported with explicit expert-index loops for line-by-line parity.
+#![allow(clippy::needless_range_loop)]
+
 pub mod cache;
 pub mod ring;
 pub mod tier;

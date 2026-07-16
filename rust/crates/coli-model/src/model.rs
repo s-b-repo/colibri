@@ -214,12 +214,11 @@ impl Model {
         let logits = self.forward_step(prompt, 0);
         let mut next = sampler.pick(&logits[(prompt.len() - 1) * vocab..prompt.len() * vocab], -1) as i32;
         let mut out = vec![next];
-        let mut pos = prompt.len();
-        for _ in 1..n_new {
+        for step in 1..n_new {
+            let pos = prompt.len() + step - 1; // first decode attends at prompt.len()
             let lg = self.forward_step(&[next], pos);
             next = sampler.pick(&lg[..vocab], -1) as i32;
             out.push(next);
-            pos += 1;
         }
         out
     }
