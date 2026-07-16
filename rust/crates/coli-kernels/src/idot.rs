@@ -36,7 +36,12 @@ pub fn dot_i4i8_scalar(w4: &[u8], x: &[i8], n: usize) -> i32 {
 pub fn dot_i8i8(w: &[i8], x: &[i8], n: usize) -> i32 {
     #[cfg(target_arch = "x86_64")]
     {
-        if std::is_x86_feature_detected!("avxvnni") {
+        // The VNNI kernel is `#[target_feature(enable = "avx2,avxvnni")]`, so BOTH
+        // must be present — checking only avxvnni would be unsound on a
+        // (hypothetical) CPU reporting avxvnni without avx2.
+        // SAFETY: each branch calls a target_feature fn only after detecting the
+        // exact features it requires at runtime.
+        if std::is_x86_feature_detected!("avx2") && std::is_x86_feature_detected!("avxvnni") {
             return unsafe { x86::dot_i8i8_vnni(w, x, n) };
         }
         if std::is_x86_feature_detected!("avx2") {
@@ -51,6 +56,7 @@ pub fn dot_i8i8(w: &[i8], x: &[i8], n: usize) -> i32 {
 pub fn dot_i4i8(w4: &[u8], x: &[i8], n: usize) -> i32 {
     #[cfg(target_arch = "x86_64")]
     {
+        // SAFETY: the avx2 kernel is only called after detecting avx2 at runtime.
         if std::is_x86_feature_detected!("avx2") {
             return unsafe { x86::dot_i4i8_avx2(w4, x, n) };
         }
@@ -201,7 +207,7 @@ mod tests {
                 if std::is_x86_feature_detected!("avx2") {
                     assert_eq!(unsafe { x86::dot_i8i8_avx2(&w, &x, n) }, reference, "avx2 n={n}");
                 }
-                if std::is_x86_feature_detected!("avxvnni") {
+                if std::is_x86_feature_detected!("avx2") && std::is_x86_feature_detected!("avxvnni") {
                     assert_eq!(unsafe { x86::dot_i8i8_vnni(&w, &x, n) }, reference, "vnni n={n}");
                 }
             }

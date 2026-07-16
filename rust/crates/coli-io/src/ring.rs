@@ -54,8 +54,21 @@ mod uring {
     impl Reactor {
         /// `entries` = submission-queue depth (rounded up to a power of two by the
         /// kernel). Cold NVMe streaming wants this ≥ the per-layer expert count.
+        ///
+        /// The ring is set up with `SINGLE_ISSUER` (all submissions come from the
+        /// one owner thread → the kernel skips per-op submitter locking) and
+        /// `COOP_TASKRUN` (completion task work is run cooperatively at
+        /// `io_uring_enter` instead of via IPIs → less overhead). Both match our
+        /// one-thread-drains-the-ring model and reduce per-batch cost. If a kernel
+        /// rejects the flags we fall back to a plain ring. (`SQPOLL` — submission
+        /// with no `enter` syscall at all — is a further win but needs privileges,
+        /// so it's left opt-in for future work.)
         pub fn new(entries: u32) -> io::Result<Reactor> {
-            let ring = IoUring::new(entries)?;
+            let ring = IoUring::builder()
+                .setup_single_issuer()
+                .setup_coop_taskrun()
+                .build(entries)
+                .or_else(|_| IoUring::new(entries))?;
             Ok(Reactor { ring, cap: entries as usize, force_async: true })
         }
 

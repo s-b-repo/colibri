@@ -23,7 +23,15 @@ pub struct QtWeight {
 
 impl QtWeight {
     /// Build from already-quantized data (also the test constructor).
+    ///
+    /// Only [`QtFmt::Int8`] and [`QtFmt::Int4`] are supported today; constructing
+    /// another format would make `apply`/`dequant` hit an `unreachable!` deep in
+    /// the compute path, so we assert the invariant here where the misuse is.
     pub fn new(fmt: QtFmt, o: usize, i: usize, q: Vec<u8>, scale: Vec<f32>) -> QtWeight {
+        debug_assert!(
+            matches!(fmt, QtFmt::Int8 | QtFmt::Int4),
+            "QtWeight supports Int8/Int4 only (got {fmt:?})"
+        );
         QtWeight { fmt, o, i, q, scale }
     }
 
