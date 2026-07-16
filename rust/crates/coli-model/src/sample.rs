@@ -63,7 +63,10 @@ impl Sampler {
             self.idx.clear();
             self.idx.extend(0..v);
             let p = &self.p;
-            self.idx.sort_by(|&a, &b| p[b].partial_cmp(&p[a]).unwrap()); // desc
+            // total_cmp is a total order over f32 (NaN-safe) — `partial_cmp` would
+            // return None on a NaN probability and panic on unwrap, and a NaN in a
+            // sort comparator also violates sort's ordering contract.
+            self.idx.sort_by(|&a, &b| p[b].total_cmp(&p[a])); // desc
             let mut cum = 0f64;
             let mut keep = v;
             for i in 0..v {
@@ -167,6 +170,16 @@ mod tests {
         for _ in 0..100 {
             assert_eq!(s.pick(&lo, -1), 3);
         }
+    }
+
+    #[test]
+    fn nan_logits_do_not_panic() {
+        // a NaN logit (e.g. from a corrupted forward) must not panic the sort or
+        // the sampler — total_cmp gives a total order and the result stays valid.
+        let lo = [1.0f32, f32::NAN, 2.0, 0.5];
+        let mut s = Sampler::new(1.0, 0.9, 5);
+        let t = s.pick(&lo, -1);
+        assert!(t < lo.len());
     }
 
     #[test]

@@ -18,27 +18,24 @@ pub struct ReadReq<'a> {
 /// Portable fallback: one `pread` per request. Returns per-request byte counts
 /// (or a negative errno). Always available; used to validate the io_uring path.
 pub fn pread_many(reqs: &mut [ReadReq]) -> Vec<i64> {
+    use std::mem::ManuallyDrop;
     use std::os::unix::fs::FileExt;
+    use std::os::unix::io::FromRawFd;
     reqs.iter_mut()
         .map(|r| {
-            // SAFETY: we only read via the fd; the File is not owned so we must
-            // not close it — use a borrowed File that we `forget`.
-            let file = unsafe { borrow_fd(r.fd) };
-            let res = match file.read_at(r.buf, r.offset) {
+            // Borrow the caller's fd for a positioned read without taking
+            // ownership: `ManuallyDrop` stops `File`'s Drop from closing a
+            // descriptor we don't own (clearer and safer than `mem::forget`,
+            // which risks a use-after-forget).
+            // SAFETY: `r.fd` is a live descriptor the caller keeps open for the
+            // duration of this call; we only read from it.
+            let file = ManuallyDrop::new(unsafe { std::fs::File::from_raw_fd(r.fd) });
+            match file.read_at(r.buf, r.offset) {
                 Ok(n) => n as i64,
                 Err(e) => -(e.raw_os_error().unwrap_or(5) as i64),
-            };
-            std::mem::forget(file);
-            res
+            }
         })
         .collect()
-}
-
-// Reconstruct a File from a raw fd for a borrowed read, without taking ownership
-// (caller must `forget` it so Drop doesn't close the fd).
-unsafe fn borrow_fd(fd: RawFd) -> std::fs::File {
-    use std::os::unix::io::FromRawFd;
-    std::fs::File::from_raw_fd(fd)
 }
 
 #[cfg(target_os = "linux")]
@@ -98,7 +95,7 @@ mod uring {
                         self.ring
                             .submission()
                             .push(&e)
-                            .map_err(|_| io::Error::new(io::ErrorKind::Other, "submission queue full"))?;
+                            .map_err(|_| io::Error::other("submission queue full"))?;
                     }
                 }
                 self.ring.submit_and_wait(end - i)?;

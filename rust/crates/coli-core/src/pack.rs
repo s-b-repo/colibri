@@ -35,7 +35,8 @@ pub fn write_safetensors(dir: &Path, blobs: &[Blob]) -> std::io::Result<()> {
         data.extend_from_slice(&b.bytes);
         cursor = end;
     }
-    let hdr = serde_json::to_vec(&serde_json::Value::Object(header)).unwrap();
+    let hdr = serde_json::to_vec(&serde_json::Value::Object(header))
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
     let mut out = Vec::with_capacity(8 + hdr.len() + data.len());
     out.extend_from_slice(&(hdr.len() as u64).to_le_bytes());
     out.extend_from_slice(&hdr);

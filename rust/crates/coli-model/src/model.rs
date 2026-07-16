@@ -158,10 +158,13 @@ impl Model {
         let d = self.cfg.hidden as usize;
         let eps = self.cfg.eps;
 
-        // embedding lookup
+        // embedding lookup — clamp out-of-range ids (a malformed prompt token, or
+        // a negative id) into `0..vocab` so a bad input can't index out of bounds.
+        let vocab = self.cfg.vocab as usize;
         let mut x = vec![0f32; s_n * d];
         for (s, &t) in tokens.iter().enumerate() {
-            x[s * d..s * d + d].copy_from_slice(&self.embed[t as usize * d..t as usize * d + d]);
+            let tid = (t.max(0) as usize).min(vocab.saturating_sub(1));
+            x[s * d..s * d + d].copy_from_slice(&self.embed[tid * d..tid * d + d]);
         }
 
         // split disjoint fields so attention can borrow layers (imm) + kv (mut)
@@ -201,6 +204,11 @@ impl Model {
     /// Greedy/sampled generation: prefill `prompt`, then decode `n_new` tokens.
     /// Resets the KV cache first. Returns the newly generated token ids.
     pub fn generate(&mut self, prompt: &[i32], n_new: usize, sampler: &mut Sampler) -> Vec<i32> {
+        // an empty prompt has no last-position logits to sample from, and no
+        // requested tokens is a no-op — both would otherwise underflow below.
+        if prompt.is_empty() || n_new == 0 {
+            return Vec::new();
+        }
         self.reset();
         let vocab = self.cfg.vocab as usize;
         let logits = self.forward_step(prompt, 0);
@@ -276,6 +284,21 @@ mod tests {
         let mut s = Sampler::new(0.0, 0.9, 1);
         let gen = m.generate(&prompt, 1, &mut s);
         assert_eq!(gen[0], tf[prompt.len() - 1]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn handles_empty_prompt_and_out_of_range_tokens() {
+        // regression: empty prompt / zero n_new must not underflow, and out-of-
+        // range or negative token ids must be clamped, not index out of bounds.
+        let dir = tmp_model_dir("edge");
+        let mut m = Model::load(&dir).unwrap();
+        let mut s = Sampler::new(0.0, 0.9, 1);
+        assert!(m.generate(&[], 4, &mut s).is_empty());
+        assert!(m.generate(&[1, 2], 0, &mut s).is_empty());
+        let logits = m.forward_step(&[9999, -3, 0], 0);
+        assert_eq!(logits.len(), 3 * m.cfg.vocab as usize);
+        assert!(logits.iter().all(|v| v.is_finite()));
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

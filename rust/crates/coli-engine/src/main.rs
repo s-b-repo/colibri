@@ -26,7 +26,10 @@ fn main() {
     }
     // `build <dir>`: write a tiny synthetic model to <dir> (for serve testing).
     if args.get(1).map(String::as_str) == Some("build") {
-        let dir = args.get(2).expect("usage: coli-engine build <dir>");
+        let Some(dir) = args.get(2) else {
+            eprintln!("usage: coli-engine build <dir>");
+            std::process::exit(2);
+        };
         coli_model::testkit::build_tiny_model(Path::new(dir));
         eprintln!("wrote demo model to {dir}");
         return;
@@ -43,25 +46,36 @@ fn main() {
             std::process::exit(1);
         }
     };
-    serve(&mut model);
+    if let Err(e) = serve(&mut model) {
+        // the peer closing the pipe mid-response is a normal end, not a failure
+        if e.kind() != std::io::ErrorKind::BrokenPipe {
+            eprintln!("serve I/O error: {e}");
+            std::process::exit(1);
+        }
+    }
 }
 
 /// stdio serve loop. Requests (one per line):
 ///   `GEN <ngen> <tok0> <tok1> ...`  → greedy-generate `ngen` tokens
 ///   `QUIT`                          → exit
 /// Each response is the space-separated generated token ids, then `END`.
-fn serve(model: &mut Model) {
+///
+/// Returns `Ok` on a clean shutdown (EOF/QUIT). A write error (e.g. the client
+/// closed the pipe) is propagated so the caller can exit quietly rather than
+/// panicking mid-response.
+fn serve(model: &mut Model) -> std::io::Result<()> {
     let stdin = std::io::stdin();
     let mut reader = stdin.lock();
     let mut out = std::io::stdout();
-    out.write_all(READY).unwrap();
-    out.flush().unwrap();
+    out.write_all(READY)?;
+    out.flush()?;
 
     let mut line = String::new();
     loop {
         line.clear();
+        // a read error is treated as EOF — the peer is gone either way
         if reader.read_line(&mut line).unwrap_or(0) == 0 {
-            break; // EOF
+            break;
         }
         let t = line.trim();
         if t.is_empty() {
@@ -78,13 +92,14 @@ fn serve(model: &mut Model) {
                 let mut sampler = Sampler::new(0.0, 0.9, 1); // greedy = deterministic
                 let toks = model.generate(&prompt, ngen, &mut sampler);
                 let rendered: Vec<String> = toks.iter().map(|t| t.to_string()).collect();
-                out.write_all(rendered.join(" ").as_bytes()).unwrap();
-                out.write_all(b"\n").unwrap();
+                out.write_all(rendered.join(" ").as_bytes())?;
+                out.write_all(b"\n")?;
             }
         }
-        out.write_all(END).unwrap();
-        out.flush().unwrap();
+        out.write_all(END)?;
+        out.flush()?;
     }
+    Ok(())
 }
 
 fn run_demo() {
