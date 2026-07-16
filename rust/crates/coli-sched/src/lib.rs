@@ -32,40 +32,57 @@ pub struct DiskExpert {
     pub dims: MlpDims,
 }
 
-/// Read every disk expert's blob. On Linux this uses one io_uring
-/// `submit_and_wait` for the whole batch; otherwise a `pread` fallback.
-fn read_disk_blobs(specs: &[(usize, RawFd, u64, usize, MlpDims)]) -> Vec<(usize, Vec<u8>, MlpDims)> {
-    let mut bufs: Vec<Vec<u8>> = specs.iter().map(|&(_, _, _, len, _)| vec![0u8; len]).collect();
-
+/// Owns the io_uring ring so it's set up **once** and reused across every
+/// `moe_streamed` call (the ring is a syscall + a couple of mmaps to create —
+/// per-layer-per-token setup would dominate). Falls back to `pread` when
+/// io_uring is unavailable. This is the persistent I/O lane.
+pub struct Streamer {
     #[cfg(target_os = "linux")]
-    let ok = {
-        use coli_io::{ReadReq, Reactor};
-        match Reactor::new(specs.len().max(1) as u32) {
-            Ok(mut reactor) => {
-                let mut reqs: Vec<ReadReq> = bufs
-                    .iter_mut()
-                    .zip(specs)
-                    .map(|(b, s)| ReadReq { fd: s.1, offset: s.2, buf: b.as_mut_slice(), tag: s.0 as u64 })
-                    .collect();
-                reactor.read_many(&mut reqs).is_ok()
-            }
-            Err(_) => false,
-        }
-    };
-    #[cfg(not(target_os = "linux"))]
-    let ok = false;
+    reactor: Option<coli_io::Reactor>,
+}
 
-    if !ok {
-        use coli_io::{pread_many, ReadReq};
-        let mut reqs: Vec<ReadReq> = bufs
-            .iter_mut()
-            .zip(specs)
-            .map(|(b, s)| ReadReq { fd: s.1, offset: s.2, buf: b.as_mut_slice(), tag: s.0 as u64 })
-            .collect();
-        pread_many(&mut reqs);
+impl Streamer {
+    /// Create a reusable streamer with a ring of `depth` submission slots
+    /// (larger batches are chunked to this depth by `read_many`).
+    pub fn new(depth: u32) -> Streamer {
+        #[cfg(target_os = "linux")]
+        {
+            Streamer { reactor: coli_io::Reactor::new(depth.max(1)).ok() }
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            Streamer {}
+        }
     }
 
-    bufs.into_iter().zip(specs).map(|(b, s)| (s.0, b, s.4)).collect()
+    /// Read every disk expert's blob (io_uring batch on Linux, else `pread`).
+    fn read_experts(&mut self, specs: &[(usize, RawFd, u64, usize, MlpDims)]) -> Vec<(usize, Vec<u8>, MlpDims)> {
+        use coli_io::{pread_many, ReadReq};
+        let mut bufs: Vec<Vec<u8>> = specs.iter().map(|&(_, _, _, len, _)| vec![0u8; len]).collect();
+        {
+            let mut reqs: Vec<ReadReq> = bufs
+                .iter_mut()
+                .zip(specs)
+                .map(|(b, s)| ReadReq { fd: s.1, offset: s.2, buf: b.as_mut_slice(), tag: s.0 as u64 })
+                .collect();
+
+            #[cfg(target_os = "linux")]
+            let served = self.reactor.as_mut().map(|r| r.read_many(&mut reqs).is_ok()).unwrap_or(false);
+            #[cfg(not(target_os = "linux"))]
+            let served = false;
+
+            if !served {
+                pread_many(&mut reqs);
+            }
+        }
+        bufs.into_iter().zip(specs).map(|(b, s)| (s.0, b, s.4)).collect()
+    }
+}
+
+impl Default for Streamer {
+    fn default() -> Self {
+        Streamer::new(64)
+    }
 }
 
 /// Accumulate one expert's contribution into `out` (gather routed rows → SwiGLU
@@ -104,6 +121,7 @@ fn contribute(out: &mut [f32], x: &[f32], mlp: &Mlp, r: &Routed, eid: usize, hid
 /// computes resident experts; results merge into one output `[s_n, hidden]`.
 #[allow(clippy::too_many_arguments)]
 pub fn moe_streamed(
+    streamer: &mut Streamer,
     x: &[f32],
     hidden: usize,
     s_n: usize,
@@ -129,9 +147,11 @@ pub fn moe_streamed(
         }
     }
 
-    // I/O lane (streaming) ∥ CPU lane (resident compute)
+    // I/O lane (streaming, reusing the persistent ring) ∥ CPU lane (resident compute)
+    let sr = &mut *streamer;
+    let specs_ref = &disk_specs;
     let (out_from_resident, disk_blobs) = std::thread::scope(|sc| {
-        let io = sc.spawn(|| read_disk_blobs(&disk_specs));
+        let io = sc.spawn(move || sr.read_experts(specs_ref));
         let mut out = vec![0f32; s_n * hidden];
         for &(eid, mlp) in &resident {
             contribute(&mut out, x, mlp, &r, eid, hidden, s_n);
@@ -231,7 +251,11 @@ mod tests {
             })
             .collect();
 
-        let conc = moe_streamed(&x, hidden, s_n, &router_w, &router_bias, k, true, 2.5, &locs, Some(&shared));
+        // one persistent streamer, reused across calls (the ring is set up once)
+        let mut streamer = Streamer::new(64);
+        let conc = moe_streamed(&mut streamer, &x, hidden, s_n, &router_w, &router_bias, k, true, 2.5, &locs, Some(&shared));
+        let conc2 = moe_streamed(&mut streamer, &x, hidden, s_n, &router_w, &router_bias, k, true, 2.5, &locs, Some(&shared));
+        assert_eq!(conc, conc2, "reused streamer must give identical output");
 
         for z in 0..s_n * hidden {
             let tol = 1e-3 * seq[z].abs().max(1.0);
