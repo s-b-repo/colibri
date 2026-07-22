@@ -1,0 +1,30 @@
+# colibrì Rust engine — cargo workspace.
+#
+# A from-scratch Rust rewrite that drives CPU, GPU, SSD, and RAM concurrently
+# (see /home/kali/.claude/plans/can-we-make-it-lexical-shannon.md). Crates are
+# added milestone by milestone so the workspace always builds green:
+#   coli-core     M0  formats: Cfg, safetensors index, QT quant, dtype
+#   coli-kernels  M1  std::arch int4/int8/int2 + f32 matmul (token-exact)
+#   coli-io       M2  io-uring reactor, slab arena, LRU/pin tiers
+#   coli-cuda     M3  FFI to ../c/backend_cuda.cu (feature = "cuda")
+#   coli-model    M1+ MLA, router, MoE, DSA, MTP + the 3-lane scheduler
+#   coli-engine   M7  binary: CLI + stdio serve protocol (drop-in for c/glm)
+[workspace]
+resolver = "2"
+members = ["crates/coli-core", "crates/coli-kernels", "crates/coli-model", "crates/coli-io", "crates/coli-sched", "crates/coli-engine", "crates/coli-cuda"]
+
+[workspace.package]
+edition = "2021"
+license = "MIT"
+repository = "https://github.com/s-b-repo/colibri"
+
+[workspace.dependencies]
+serde_json = "1"
+
+# Release profile tuned for the CPU matmul path (M1+): fat LTO + single codegen
+# unit so the SIMD kernels inline across crate boundaries. Harmless for M0.
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "abort"

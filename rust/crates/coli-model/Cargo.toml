@@ -1,0 +1,12 @@
+[package]
+name = "coli-model"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "colibrì GLM-5.2 forward pass: MLA attention, sigmoid router, MoE, and (later) the concurrent scheduler"
+
+[dependencies]
+coli-core = { path = "../coli-core" }
+coli-kernels = { path = "../coli-kernels" }
+serde_json.workspace = true
